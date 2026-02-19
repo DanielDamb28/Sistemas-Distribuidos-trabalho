@@ -1,0 +1,323 @@
+services:
+
+  # ----------------------------------------
+
+  # NÓ PRIMÁRIO (Master)
+
+  # ----------------------------------------
+
+  pg_primary:
+
+    image: postgres:15
+
+    container_name: pg_primary
+
+    environment:
+
+      - POSTGRES_USER=usuario_padrao
+
+      - POSTGRES_PASSWORD=senha_padrao
+
+      - POSTGRES_DB=meu_banco
+
+      - POSTGRES_HOST_AUTH_METHOD=trust
+
+    command:
+
+      - "bash"
+
+      - "-c"
+
+      - |
+
+        mkdir -p /docker-entrypoint-initdb.d
+
+        cat << 'EOF' > /docker-entrypoint-initdb.d/01-configura-replicacao.sh
+
+        #!/bin/bash
+
+        echo "host replication all 0.0.0.0/0 trust" >> /var/lib/postgresql/data/pg_hba.conf
+
+        echo "host all all 0.0.0.0/0 trust" >> /var/lib/postgresql/data/pg_hba.conf
+
+        psql -U usuario_padrao -d meu_banco -c "ALTER ROLE usuario_padrao WITH REPLICATION;"
+
+        EOF
+
+        chmod +x /docker-entrypoint-initdb.d/01-configura-replicacao.sh
+
+        exec docker-entrypoint.sh postgres
+
+    healthcheck:
+
+      test: ["CMD-SHELL", "pg_isready -U usuario_padrao -d meu_banco"]
+
+      interval: 5s
+
+      timeout: 5s
+
+      retries: 5
+
+    volumes:
+
+      - pg_primary_data:/var/lib/postgresql/data
+
+    networks:
+
+      - pg_network
+
+
+
+  # ----------------------------------------
+
+  # RÉPLICA 1 (Slave Principal)
+
+  # ----------------------------------------
+
+  pg_replica_1:
+
+    image: postgres:15
+
+    container_name: pg_replica_1
+
+    depends_on:
+
+      - pg_primary
+
+    environment:
+
+      - POSTGRES_USER=usuario_padrao
+
+      - POSTGRES_PASSWORD=senha_padrao
+
+      - POSTGRES_HOST_AUTH_METHOD=trust
+
+    command:
+
+      - "bash"
+
+      - "-c"
+
+      - |
+
+        until psql -h pg_primary -p 5432 -U usuario_padrao -d meu_banco -c '\q' 2>/dev/null; do
+
+          sleep 2;
+
+        done;
+
+        rm -rf /var/lib/postgresql/data/*
+
+        gosu postgres pg_basebackup -h pg_primary -p 5432 -U usuario_padrao -D /var/lib/postgresql/data -Fp -Xs -P -R
+
+        # Configura para aceitar conexões de todos para facilitar promoção
+
+        echo "host all all 0.0.0.0/0 trust" >> /var/lib/postgresql/data/pg_hba.conf
+
+        chown -R postgres:postgres /var/lib/postgresql/data
+
+        chmod 700 /var/lib/postgresql/data
+
+        exec gosu postgres postgres
+
+    healthcheck:
+
+      test: ["CMD-SHELL", "pg_isready -U usuario_padrao -d meu_banco"]
+
+      interval: 5s
+
+      timeout: 5s
+
+      retries: 5
+
+    volumes:
+
+      - pg_replica_1_data:/var/lib/postgresql/data
+
+    networks:
+
+      - pg_network
+
+
+
+  # ----------------------------------------
+
+  # RÉPLICA 2 (Slave de Backup)
+
+  # ----------------------------------------
+
+  pg_replica_2:
+
+    image: postgres:15
+
+    container_name: pg_replica_2
+
+    depends_on:
+
+      - pg_primary
+
+    environment:
+
+      - POSTGRES_USER=usuario_padrao
+
+      - POSTGRES_PASSWORD=senha_padrao
+
+      - POSTGRES_HOST_AUTH_METHOD=trust
+
+    command:
+
+      - "bash"
+
+      - "-c"
+
+      - |
+
+        until psql -h pg_primary -p 5432 -U usuario_padrao -d meu_banco -c '\q' 2>/dev/null; do
+
+          sleep 2;
+
+        done;
+
+        rm -rf /var/lib/postgresql/data/*
+
+        gosu postgres pg_basebackup -h pg_primary -p 5432 -U usuario_padrao -D /var/lib/postgresql/data -Fp -Xs -P -R
+
+        echo "host all all 0.0.0.0/0 trust" >> /var/lib/postgresql/data/pg_hba.conf
+
+        chown -R postgres:postgres /var/lib/postgresql/data
+
+        chmod 700 /var/lib/postgresql/data
+
+        exec gosu postgres postgres
+
+    healthcheck:
+
+      test: ["CMD-SHELL", "pg_isready -U usuario_padrao -d meu_banco"]
+
+      interval: 5s
+
+      timeout: 5s
+
+      retries: 5
+
+    volumes:
+
+      - pg_replica_2_data:/var/lib/postgresql/data
+
+    networks:
+
+      - pg_network
+
+
+
+  # ----------------------------------------
+
+  # PGPOOL-II (Configurado para Failover)
+
+  # ----------------------------------------
+
+  pgpool:
+
+    image: pgpool/pgpool:latest
+
+    container_name: pgpool
+
+    depends_on:
+
+      pg_primary:
+
+        condition: service_healthy
+
+      pg_replica_1:
+
+        condition: service_healthy
+
+      pg_replica_2:
+
+        condition: service_healthy
+
+    environment:
+
+      - PGPOOL_PARAMS_MASTER_SLAVE_MODE=on
+
+      - PGPOOL_PARAMS_MASTER_SLAVE_SUB_MODE=stream
+
+      - PGPOOL_PARAMS_LOAD_BALANCE_MODE=on
+
+     
+
+      # Backends
+
+      - PGPOOL_PARAMS_BACKEND_HOSTNAME0=pg_primary
+
+      - PGPOOL_PARAMS_BACKEND_PORT0=5432
+
+      - PGPOOL_PARAMS_BACKEND_WEIGHT0=1
+
+      - PGPOOL_PARAMS_BACKEND_FLAG0=ALLOW_TO_FAILOVER
+
+     
+
+      - PGPOOL_PARAMS_BACKEND_HOSTNAME1=pg_replica_1
+
+      - PGPOOL_PARAMS_BACKEND_PORT1=5432
+
+      - PGPOOL_PARAMS_BACKEND_WEIGHT1=1
+
+      - PGPOOL_PARAMS_BACKEND_FLAG1=ALLOW_TO_FAILOVER
+
+     
+
+      - PGPOOL_PARAMS_BACKEND_HOSTNAME2=pg_replica_2
+
+      - PGPOOL_PARAMS_BACKEND_PORT2=5432
+
+      - PGPOOL_PARAMS_BACKEND_WEIGHT2=1
+
+      - PGPOOL_PARAMS_BACKEND_FLAG2=ALLOW_TO_FAILOVER
+
+
+
+      # Failover Config
+
+      - PGPOOL_PARAMS_FAILOVER_COMMAND=/usr/local/bin/failover.sh %d %h %p %D %m %M %H %P
+
+      - PGPOOL_PARAMS_HEALTH_CHECK_PERIOD=10
+
+      - PGPOOL_PARAMS_HEALTH_CHECK_USER=usuario_padrao
+
+      - PGPOOL_PARAMS_HEALTH_CHECK_PASSWORD=senha_padrao
+
+      - PGPOOL_PARAMS_SR_CHECK_USER=usuario_padrao
+
+      - PGPOOL_PARAMS_SR_CHECK_PASSWORD=senha_padrao
+
+    ports:
+
+      - "5432:9999"
+
+    volumes:
+
+      - ./failover.sh:/usr/local/bin/failover.sh:ro
+
+    networks:
+
+      - pg_network
+
+
+
+volumes:
+
+  pg_primary_data:
+
+  pg_replica_1_data:
+
+  pg_replica_2_data:
+
+
+
+networks:
+
+  pg_network:
+
+    driver: bridge
