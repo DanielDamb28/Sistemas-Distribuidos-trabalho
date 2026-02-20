@@ -24,13 +24,9 @@ services:
         chmod +x /docker-entrypoint-initdb.d/01-configura-replicacao.sh
         exec docker-entrypoint.sh postgres
     healthcheck:
-
       test: ["CMD-SHELL", "pg_isready -U usuario_padrao -d meu_banco"]
-
       interval: 15s
-
       timeout: 5s
-
       retries: 5
     volumes:
       - pg_primary_data:/var/lib/postgresql/data
@@ -44,7 +40,8 @@ services:
     image: postgres:15
     container_name: pg_replica_1
     depends_on:
-      - pg_primary
+      pg_primary:
+        condition: service_healthy
     environment:
       - POSTGRES_USER=usuario_padrao
       - POSTGRES_PASSWORD=senha_padrao
@@ -58,11 +55,15 @@ services:
         done;
         rm -rf /var/lib/postgresql/data/*
         gosu postgres pg_basebackup -h pg_primary -p 5432 -U usuario_padrao -D /var/lib/postgresql/data -Fp -Xs -P -R
-        # Configura para aceitar conexões de todos para facilitar promoção
         echo "host all all 0.0.0.0/0 trust" >> /var/lib/postgresql/data/pg_hba.conf
         chown -R postgres:postgres /var/lib/postgresql/data
         chmod 700 /var/lib/postgresql/data
         exec gosu postgres postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U usuario_padrao -d meu_banco"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     volumes:
       - pg_replica_1_data:/var/lib/postgresql/data
     networks:
@@ -75,7 +76,8 @@ services:
     image: postgres:15
     container_name: pg_replica_2
     depends_on:
-      - pg_primary
+      pg_primary:
+        condition: service_healthy
     environment:
       - POSTGRES_USER=usuario_padrao
       - POSTGRES_PASSWORD=senha_padrao
@@ -93,6 +95,11 @@ services:
         chown -R postgres:postgres /var/lib/postgresql/data
         chmod 700 /var/lib/postgresql/data
         exec gosu postgres postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U usuario_padrao -d meu_banco"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     volumes:
       - pg_replica_2_data:/var/lib/postgresql/data
     networks:
@@ -108,9 +115,9 @@ services:
       pg_primary:
         condition: service_healthy
       pg_replica_1:
-        condition: service_started
+        condition: service_healthy
       pg_replica_2:
-        condition: service_started
+        condition: service_healthy
     environment:
       - PGPOOL_PARAMS_MASTER_SLAVE_MODE=on
       - PGPOOL_PARAMS_MASTER_SLAVE_SUB_MODE=stream
